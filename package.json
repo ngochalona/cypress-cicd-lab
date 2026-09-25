@@ -1,0 +1,13 @@
+{
+    "name": "cypress-cicd-lab",
+    "version": "1.0.0",
+    "private": true,
+    "scripts": {
+        "cy:open": "cypress open",
+        "cy:run": "cypress run",
+        "e2e": "node scripts/run-e2e.js"
+    },
+    "devDependencies": {
+        "cypress": "16.1.0"
+    }
+}
