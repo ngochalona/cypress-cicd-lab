@@ -1,0 +1,50 @@
+apiVersion: batch/v1                
+kind: Job                           
+metadata:
+  name: cypress-e2e                 
+  labels:
+    app: cypress-e2e
+    release: "${RELEASE_VERSION}"   
+spec:
+  backoffLimit: 0                   
+  activeDeadlineSeconds: 1800       
+  ttlSecondsAfterFinished: 86400    
+  template:                         
+    metadata:
+      labels:
+        app: cypress-e2e            
+    spec:
+      restartPolicy: Never          
+      imagePullSecrets:
+        - name: ghcr-cred           
+      containers:
+        - name: cypress
+          image: ${IMAGE}           
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SPEC_PATTERN
+              value: "${SPEC_PATTERN}"
+            - name: RELEASE_VERSION
+              value: "${RELEASE_VERSION}"
+            - name: RUN_URL
+              value: "${RUN_URL}"
+            - name: SLACK_WEBHOOK_E2E
+              valueFrom:
+                secretKeyRef:      
+                  name: slack-webhooks
+                  key: e2e
+                  optional: true   
+          resources:
+            requests:               
+              cpu: "500m"         
+              memory: "1Gi"
+            limits:
+              memory: "2Gi"        
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm  
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory         
+            sizeLimit: 512Mi
