@@ -6,7 +6,7 @@ ENV CI=1
 COPY package.json package-lock.json ./
 RUN npm ci && npx cypress verify
 
-COPY cypress.config.notfound.js ./
+COPY cypress.config.js ./
 COPY cypress ./cypress
 COPY scripts ./scripts
 
