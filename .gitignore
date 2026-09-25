@@ -1,0 +1,8 @@
+# Những thứ KHÔNG commit lên Git
+node_modules/
+cypress/screenshots/
+cypress/videos/
+dist/
+.env
+*.kubeconfig
+job.local.yml
