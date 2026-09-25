@@ -1,0 +1,8 @@
+services:
+  cypress:                                            
+    image: ${IMAGE:-cypress-cicd-lab:local}           
+    environment:                                      
+      SPEC_PATTERN: ${SPEC_PATTERN:-cypress/e2e/**/*.cy.js}
+      RELEASE_VERSION: ${RELEASE_VERSION:-local}
+      SLACK_WEBHOOK_E2E: ${SLACK_WEBHOOK_E2E:-}
+    shm_size: "1gb"                                  
