@@ -1,0 +1,98 @@
+name: "Flow 2 - Develop Build & Release"
+
+on:
+  push:
+    branches: [develop]                  
+  workflow_dispatch:                     
+
+permissions:
+  contents: write                        
+  packages: write                        
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Generate metadata
+        id: meta                         
+        run: |
+          VERSION="$(date -u +%Y.%m%d.%H%M%S)-develop"   # vd 2026.0923.051530-develop
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"          # ,, = đổi thành chữ thường (registry bắt buộc)
+          BUILD_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          {
+            echo "version=$VERSION"
+            echo "image=$IMAGE"
+            echo "image_tag=$IMAGE:$VERSION"
+            echo "build_url=$BUILD_URL"
+          } >> "$GITHUB_OUTPUT"          # ghi ra output của step
+          echo "Version: $VERSION"
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login GHCR
+        uses: docker/login-action@v4     
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}             
+          password: ${{ secrets.GITHUB_TOKEN }}     
+
+      - name: Docker build & push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true                     
+          tags: |                        
+            ${{ steps.meta.outputs.image_tag }}
+            ${{ steps.meta.outputs.image }}:develop
+          build-args: |                  
+            CI_BUILD_URL=${{ steps.meta.outputs.build_url }}
+          labels: |                      
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Package infra (ZIP)
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
+        run: |
+          mkdir -p dist
+          # "Chụp" image tag vào gói -> release biết chính xác phải chạy image nào
+          echo "IMAGE=$IMAGE_TAG" > .infra/release.env
+          (cd .infra && zip -r "../dist/cypress-infra.$VERSION.zip" .)   # nén toàn bộ .infra/
+          unzip -l "dist/cypress-infra.$VERSION.zip"                      # in danh sách file trong zip
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}      
+          VERSION: ${{ steps.meta.outputs.version }}
+          IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
+          BUILD_URL: ${{ steps.meta.outputs.build_url }}
+        run: |
+          gh release create "v$VERSION" dist/*.zip \
+            --target "$GITHUB_SHA" \
+            --title "v$VERSION" \
+            --notes "Image: \`$IMAGE_TAG\`  Build: $BUILD_URL"
+
+      - name: Slack notification (Group A - CI/CD)
+        if: always()                     # luôn chạy, kể cả khi các bước trên lỗi -> báo được "failure"
+        env:
+          SLACK_WEBHOOK_CICD: ${{ secrets.SLACK_WEBHOOK_CICD }}
+          STATUS: ${{ job.status }}      
+          VERSION: ${{ steps.meta.outputs.version }}
+          BUILD_URL: ${{ steps.meta.outputs.build_url }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_CICD" ]; then echo "Chưa có secret SLACK_WEBHOOK_CICD -> bỏ qua"; exit 0; fi
+          ICON=":white_check_mark:"; [ "$STATUS" = "success" ] || ICON=":x:"
+          TEXT="$ICON *${GITHUB_WORKFLOW}* - ${STATUS}
+          Commit: ${COMMIT_MSG%%$'\n'*}
+          Release: v${VERSION}
+          Build: ${BUILD_URL}"
+          # jq dựng JSON an toàn (tự escape dấu nháy, xuống dòng trong commit message)
+          jq -n --arg text "$TEXT" '{text: $text}' \
+            | curl -sS -X POST -H 'Content-Type: application/json' --data @- "$SLACK_WEBHOOK_CICD"
