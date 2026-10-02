@@ -1,0 +1,90 @@
+# FLOW 3 - SCHEDULED E2E: theo lịch, lấy release mới nhất -> tạo cluster K8s -> chạy Job Cypress -> Slack nhóm B
+name: "Flow 3 - Scheduled E2E"
+
+on:
+  schedule:
+    - cron: "0 5 * * *"   # giờ UTC! 05:00 UTC = 07:00 Berlin mùa hè (mùa đông "0 6 * * *"); 07:00 Việt Nam = "0 0 * * *"
+  workflow_dispatch:      # chạy tay, có 2 ô nhập tuỳ chọn:
+    inputs:
+      release_tag:
+        description: "Tag release muốn chạy (trống = release mới nhất)"
+        required: false
+      spec_pattern:
+        description: "Spec pattern"
+        required: false
+        default: "cypress/e2e/**/*.cy.js"
+
+permissions:
+  contents: read          # đọc release
+  packages: read          # kéo image từ ghcr.io
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    env:                  # biến dùng chung cho mọi step của job
+      SPEC_PATTERN: ${{ inputs.spec_pattern || 'cypress/e2e/**/*.cy.js' }}   # chạy theo lịch thì inputs rỗng -> dùng mặc định
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      # Không checkout code: Flow 3 chỉ dùng thứ ĐÃ release (image + gói infra), giống Octopus
+      - name: Lấy release (giống Octopus chọn release để deploy)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_INPUT: ${{ inputs.release_tag }}
+        run: |
+          TAG="$TAG_INPUT"
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)   # release mới nhất
+          fi
+          echo "Release: $TAG"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.zip' --dir pkg
+          unzip -o pkg/*.zip -d infra
+          . infra/release.env                          # nạp biến IMAGE từ file trong gói
+          echo "RELEASE_VERSION=$TAG" >> "$GITHUB_ENV" # $GITHUB_ENV: biến dùng được ở các step sau
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Tạo Kubernetes cluster (kind)
+        uses: helm/kind-action@v1        # cài kind + kubectl và tạo cluster 1 node trong máy ảo
+        with:
+          cluster_name: e2e
+
+      - name: Tạo secrets trong cluster
+        env:
+          SLACK_WEBHOOK_E2E: ${{ secrets.SLACK_WEBHOOK_E2E }}
+        run: |
+          # Secret để Pod đăng nhập ghcr.io kéo image
+          kubectl create secret docker-registry ghcr-cred \
+            --docker-server=ghcr.io \
+            --docker-username="${{ github.actor }}" \
+            --docker-password="${{ secrets.GITHUB_TOKEN }}"
+          # Secret chứa webhook Slack nhóm B, Job đọc qua secretKeyRef
+          kubectl create secret generic slack-webhooks --from-literal=e2e="$SLACK_WEBHOOK_E2E"
+
+      - name: Apply Job (cypress.job.k8s.yml)
+        run: |
+          # envsubst thay ${IMAGE}... bằng giá trị thật; chỉ thay đúng 4 biến được liệt kê
+          envsubst '${IMAGE} ${SPEC_PATTERN} ${RELEASE_VERSION} ${RUN_URL}' \
+            < infra/cypress.job.k8s.yml > job.yml
+          cat job.yml
+          kubectl apply -f job.yml
+
+      - name: Chờ Job kết thúc
+        run: |
+          # Hỏi trạng thái Job mỗi 15 giây, tối đa 120 lần (30 phút)
+          for i in $(seq 1 120); do
+            OK=$(kubectl get job cypress-e2e -o jsonpath='{.status.succeeded}')
+            KO=$(kubectl get job cypress-e2e -o jsonpath='{.status.failed}')
+            if [ "$OK" = "1" ]; then echo "Job Complete"; exit 0; fi                    # container exit 0
+            if [ -n "$KO" ] && [ "$KO" != "0" ]; then echo "Job Failed"; exit 1; fi     # container exit khác 0
+            echo "Đang chạy... ($i)"; sleep 15
+          done
+          echo "Hết thời gian chờ"; exit 1
+
+      - name: Log của Pod
+        if: always()                     # thành công hay thất bại đều in log để đọc
+        run: |
+          kubectl get job,pods -o wide || true
+          kubectl logs job/cypress-e2e --tail=-1 || true
+
+      - name: Debug khi lỗi
+        if: failure()                    # chỉ chạy khi có bước trước bị lỗi
+        run: kubectl describe pods -l app=cypress-e2e || true
